@@ -1,0 +1,703 @@
+"""
+Digital Attendance System - Real-Time Webcam Version
+
+Description:
+A modern, modular GUI application for managing digital attendance
+from single images or webcam captures. Features include:
+
+- Loading common image formats (jpg/png/bmp) with validation
+- Real‑time webcam streaming and capture
+- Resizing while preserving aspect ratio with selectable
+  interpolation methods
+- Automatic brightness adjustment and optional borders
+- Watermarks with dynamic positioning
+- High‑quality output with metadata
+- Consistent naming and automatic date‑organized folders
+- Generation of tidy 2x2 collages with title and spacing
+- Attendance logging to CSV
+
+The code follows PEP8, uses descriptive names, avoids redundancy,
+and includes detailed docstrings.
+"""
+
+import os
+import csv
+import cv2
+from datetime import datetime
+from tkinter import filedialog, messagebox
+
+import customtkinter as ctk
+from PIL import (Image, ImageDraw, ImageEnhance,
+                 ImageOps, PngImagePlugin, ImageFont)
+
+
+# =========================
+# CONFIGURATION CONSTANTS
+# =========================
+
+APP_NAME = "VUF Absen System"
+SUPPORTED_FORMATS = (".jpg", ".jpeg", ".png", ".bmp")
+OUTPUT_BASE_DIR = "output"
+CSV_LOG_PATH = "attendance_log.csv"
+DEFAULT_WATERMARK_TEXT = "Kelompok 008 - ABSEN DIGITAL"
+DEFAULT_INTERPOLATION = cv2.INTER_AREA  # good for shrinking
+INTERPOLATION_OPTIONS = {
+    "Nearest": cv2.INTER_NEAREST,
+    "Linear": cv2.INTER_LINEAR,
+    "Area": cv2.INTER_AREA,
+    "Cubic": cv2.INTER_CUBIC,
+}
+WATERMARK_POSITIONS = [
+    "bottom_left",
+    "bottom_right",
+    "top_left",
+    "top_right",
+]
+DEFAULT_BORDER_SIZE = 5
+DEFAULT_BORDER_COLOR = (255, 255, 255)
+SAVE_QUALITY = 95  # JPEG quality
+COLLAGE_SPACING = 10
+# COLLAGE_TITLE_FONT can be a PIL ImageFont object or None to use default
+COLLAGE_TITLE_FONT = None  # will resolve at runtime
+COLLAGE_TITLE_COLOR = (255, 255, 255)
+
+
+# =========================
+# MAIN APPLICATION
+# =========================
+
+class DigitalAttendanceApp(ctk.CTk):
+    """Main GUI application class."""
+
+    def __init__(self):
+        super().__init__()
+
+        self.title(APP_NAME)
+        self.geometry("1200x600")
+        self.resizable(False, False)
+
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("green")
+
+        # runtime state
+        self.image = None
+        self.collage_images = []
+
+        self.cap = None
+        self.is_camera_running = False
+
+        # UI widget placeholders (pylance complains if not defined in __init__)
+        self.interp_menu = None
+        self.watermark_menu = None
+        self.preview_label = None
+        self.status_label = None
+        self.brightness_slider = None
+        self.brightness_label = None
+        self.collage_counter_label = None
+
+        # user-tunable options
+        self.interpolation = DEFAULT_INTERPOLATION
+        self.watermark_position = WATERMARK_POSITIONS[0]
+        self.border_size = DEFAULT_BORDER_SIZE
+        self.border_color = DEFAULT_BORDER_COLOR
+        self.save_quality = SAVE_QUALITY
+        self.brightness_value = 1.2  # default brightness multiplier
+
+        self._create_folders()
+        self._create_layout()
+
+    # =========================
+    # UI SECTION
+    # =========================
+
+    def _create_layout(self):
+        """Create GUI layout with improved structure."""
+        # Main container with sidebar and center area
+        main_container = ctk.CTkFrame(self)
+        main_container.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Left sidebar with controls
+        self.sidebar = ctk.CTkScrollableFrame(
+            main_container,
+            width=280,
+            fg_color="gray20"
+        )
+        self.sidebar.pack(side="left", fill="both", padx=5, pady=5)
+
+        # Center area with preview and status
+        center_area = ctk.CTkFrame(main_container)
+        center_area.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+
+        # Preview image
+        self.preview_label = ctk.CTkLabel(center_area, text="", fg_color="gray30")
+        self.preview_label.pack(expand=True, fill="both", padx=5, pady=5)
+
+        # Status bar at bottom
+        self.status_label = ctk.CTkLabel(
+            center_area,
+            text="Ready | Collage: 0/4",
+            fg_color="gray25",
+            text_color="white",
+            height=30
+        )
+        self.status_label.pack(fill="x", padx=5, pady=(5, 0))
+
+        self._create_sidebar_buttons()
+
+    def _create_sidebar_buttons(self):
+        """Create organized sidebar with grouped controls."""
+        # Title
+        ctk.CTkLabel(
+            self.sidebar,
+            text="📸 Absen Camera System",
+            font=("Arial", 16, "bold"),
+            text_color="#2ecc71"
+        ).pack(pady=15, padx=10)
+
+        # === QUICK ACTIONS ===
+        self._create_section_label("⚡ Quick Actions")
+        ctk.CTkButton(
+            self.sidebar,
+            text="📷 Quick Capture & Save",
+            command=self.quick_capture_and_save,
+            fg_color="#e74c3c",
+            hover_color="#c0392b",
+            height=35,
+            font=("Arial", 12, "bold")
+        ).pack(pady=8, padx=8, fill="x")
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="▶ Start Webcam",
+            command=self.start_webcam,
+            fg_color="#3498db",
+            hover_color="#2980b9"
+        ).pack(pady=5, padx=8, fill="x")
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="⏹ Stop Webcam",
+            command=self.stop_webcam,
+            fg_color="#95a5a6",
+            hover_color="#7f8c8d"
+        ).pack(pady=5, padx=8, fill="x")
+
+        # === IMAGE CONTROL ===
+        self._create_section_label("🖼️ Image Control")
+        ctk.CTkButton(
+            self.sidebar,
+            text="📂 Load Image",
+            command=self.load_image
+        ).pack(pady=5, padx=8, fill="x")
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="🎬 Capture Frame",
+            command=self.capture_frame
+        ).pack(pady=5, padx=8, fill="x")
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="💾 Save Image",
+            command=self.save_image
+        ).pack(pady=5, padx=8, fill="x")
+
+        # === BRIGHTNESS CONTROL ===
+        self._create_section_label("☀️ Brightness")
+        ctk.CTkLabel(self.sidebar, text="Adjust brightness level:").pack(pady=(5, 2), padx=8)
+        self.brightness_slider = ctk.CTkSlider(
+            self.sidebar,
+            from_=0.5,
+            to=2.0,
+            number_of_steps=30,
+            command=self._set_brightness
+        )
+        self.brightness_slider.set(1.2)
+        self.brightness_slider.pack(pady=5, padx=8, fill="x")
+        self.brightness_label = ctk.CTkLabel(self.sidebar, text="1.2x", text_color="#2ecc71")
+        self.brightness_label.pack(pady=2)
+
+        # === COLLAGE MANAGEMENT ===
+        self._create_section_label("🎨 Collage (0/4)")
+        self.collage_counter_label = ctk.CTkLabel(
+            self.sidebar,
+            text="Images: 0/4",
+            text_color="#f39c12"
+        )
+        self.collage_counter_label.pack(pady=5, padx=8)
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="➕ Add to Collage",
+            command=self.add_to_collage
+        ).pack(pady=5, padx=8, fill="x")
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="📸 Save Collage",
+            command=self.create_and_save_collage
+        ).pack(pady=5, padx=8, fill="x")
+
+        ctk.CTkButton(
+            self.sidebar,
+            text="🗑️ Clear Collage",
+            command=self.clear_collage,
+            fg_color="#e67e22",
+            hover_color="#d35400"
+        ).pack(pady=5, padx=8, fill="x")
+
+        # === SETTINGS ===
+        self._create_section_label("⚙️ Settings")
+        ctk.CTkLabel(self.sidebar, text="Interpolation:").pack(pady=(5, 2), padx=8)
+        self.interp_menu = ctk.CTkOptionMenu(
+            self.sidebar,
+            values=list(INTERPOLATION_OPTIONS.keys()),
+            command=self._set_interpolation
+        )
+        self.interp_menu.set(list(INTERPOLATION_OPTIONS.keys())[0])
+        self.interp_menu.pack(pady=5, padx=8, fill="x")
+
+        ctk.CTkLabel(self.sidebar, text="Watermark Position:").pack(pady=(8, 2), padx=8)
+        self.watermark_menu = ctk.CTkOptionMenu(
+            self.sidebar,
+            values=[p.replace('_', ' ').title() for p in WATERMARK_POSITIONS],
+            command=self._set_watermark_position
+        )
+        self.watermark_menu.set(WATERMARK_POSITIONS[0].replace('_', ' ').title())
+        self.watermark_menu.pack(pady=5, padx=8, fill="x")
+
+    def _create_section_label(self, text):
+        """Create a section separator label."""
+        ctk.CTkLabel(
+            self.sidebar,
+            text=text,
+            font=("Arial", 11, "bold"),
+            text_color="#95a5a6"
+        ).pack(pady=(12, 8), padx=8)
+
+    # =========================
+    # OPTION SETTERS
+    # =========================
+
+    def _set_interpolation(self, choice):
+        """Change the interpolation method used for resizing.
+
+        Args:
+            choice (str): one of the keys of INTERPOLATION_OPTIONS.
+        """
+        self.interpolation = INTERPOLATION_OPTIONS.get(choice,
+                                                        DEFAULT_INTERPOLATION)
+
+    def _set_watermark_position(self, choice):
+        """Convert human-readable menu name into internal key.
+
+        The menu displays names like 'Bottom Left'; the internal
+        representation uses underscores.
+        """
+        key = choice.replace(' ', '_').lower()
+        if key in WATERMARK_POSITIONS:
+            self.watermark_position = key
+
+    def _set_brightness(self, value):
+        """Update brightness value from slider.
+
+        Args:
+            value (float): brightness multiplier from slider.
+        """
+        self.brightness_value = float(value)
+        self.brightness_label.configure(text=f"{self.brightness_value:.1f}x")
+
+    # =========================
+    # BASIC FEATURES
+    # =========================
+
+    def _create_folders(self):
+        """Ensure base output directory exists."""
+        os.makedirs(OUTPUT_BASE_DIR, exist_ok=True)
+
+    def load_image(self):
+        """Prompt user to select a valid image file and load it.
+
+        The method validates the extension, opens the image,
+        automatically boosts brightness and displays it.
+        """
+        file_path = filedialog.askopenfilename()
+
+        if not file_path or not file_path.lower().endswith(SUPPORTED_FORMATS):
+            messagebox.showerror("Error", "Pilih file gambar jpg/png/bmp.")
+            self._update_status("Error: Invalid file")
+            return
+
+        try:
+            self.image = Image.open(file_path)
+        except (OSError, IOError) as exc:
+            messagebox.showerror("Error", f"Gagal membuka gambar: {exc}")
+            self._update_status("Error: Cannot open file")
+            return
+
+        self._auto_brightness()
+        self._display_image()
+        filename = os.path.basename(file_path)
+        self._update_status(f"✓ Loaded: {filename}")
+
+    def _auto_brightness(self):
+        """Boost brightness using current brightness slider value."""
+        enhancer = ImageEnhance.Brightness(self.image)
+        self.image = enhancer.enhance(self.brightness_value)
+
+    def _pil_interpolation(self):
+        """Return the PIL resample constant corresponding to current interpolation."""
+        try:
+            # For Pillow 10.0.0+
+            from PIL import Image as PILImage
+            mapping = {
+                1: PILImage.Resampling.NEAREST,      # cv2.INTER_NEAREST
+                0: PILImage.Resampling.BILINEAR,     # cv2.INTER_LINEAR
+                2: PILImage.Resampling.BOX,          # cv2.INTER_AREA
+                3: PILImage.Resampling.BICUBIC,      # cv2.INTER_CUBIC
+            }
+            return mapping.get(self.interpolation, PILImage.Resampling.BILINEAR)
+        except AttributeError:
+            # For older Pillow versions
+            mapping = {
+                1: 0,   # NEAREST
+                0: 2,   # BILINEAR
+                2: 4,   # BOX
+                3: 3,   # BICUBIC
+            }
+            return mapping.get(self.interpolation, 2)
+
+    def _resize_with_aspect(self, pil_image, max_size):
+        """Resize an image keeping aspect ratio using selected interpolation.
+
+        Args:
+            pil_image (PIL.Image): source image.
+            max_size (tuple): (max_width, max_height) target bounds.
+        Returns:
+            PIL.Image: resized image.
+        """
+        original_width, original_height = pil_image.size
+        max_width, max_height = max_size
+
+        ratio = min(max_width / original_width,
+                    max_height / original_height)
+        new_size = (int(original_width * ratio),
+                    int(original_height * ratio))
+
+        return pil_image.resize(new_size, resample=self._pil_interpolation())
+
+    def _display_image(self):
+        """Render the currently held image in the preview label."""
+        preview_image = self._resize_with_aspect(self.image, (600, 450))
+        # convert to CTkImage for proper scaling on high‑DPI
+        ctk_img = ctk.CTkImage(preview_image, size=(600, 450))
+        self.preview_label.configure(image=ctk_img)
+        self.preview_label.image = ctk_img
+
+    # =========================
+    # REAL-TIME WEBCAM
+    # =========================
+
+    def start_webcam(self):
+        """Activate webcam stream and begin frame updates."""
+        if self.is_camera_running:
+            return
+
+        self.cap = cv2.VideoCapture(0)
+
+        if not self.cap.isOpened():
+            messagebox.showerror("Error", "Webcam tidak terdeteksi.")
+            self._update_status("Error: Webcam not found")
+            return
+
+        self.is_camera_running = True
+        self._update_status("🔴 Webcam RUNNING")
+        self._update_webcam_frame()
+
+    def _update_webcam_frame(self):
+        """Fetch and display frames from webcam at short intervals."""
+        if not self.is_camera_running:
+            return
+
+        ret, frame = self.cap.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            live_image = Image.fromarray(frame)
+            resized = self._resize_with_aspect(live_image, (600, 450))
+            ctk_img = ctk.CTkImage(resized, size=(600, 450))
+            self.preview_label.configure(image=ctk_img)
+            self.preview_label.image = ctk_img
+
+        self.after(10, self._update_webcam_frame)
+
+    def capture_frame(self):
+        """Grab a still frame from the webcam stream and prepare it."""
+        if not self.is_camera_running:
+            messagebox.showerror("Error", "Webcam belum dijalankan.")
+            self._update_status("Error: Webcam not running")
+            return
+
+        ret, frame = self.cap.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            self.image = Image.fromarray(frame)
+            self._auto_brightness()
+            self._display_image()
+            self._update_status("✓ Frame captured")
+        else:
+            messagebox.showerror("Error", "Gagal mengambil frame dari webcam")
+            self._update_status("Error: Cannot capture frame")
+
+    def stop_webcam(self):
+        """Shut down the webcam cleanly."""
+        self.is_camera_running = False
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        self._update_status("✓ Webcam stopped")
+
+    # =========================
+    # SAVING, WATERMARK & METADATA
+    # =========================
+
+    def _add_border(self):
+        """Add a border around the image if border_size > 0."""
+        if self.border_size > 0:
+            self.image = ImageOps.expand(
+                self.image,
+                border=self.border_size,
+                fill=self.border_color)
+
+    def _add_watermark(self):
+        """Draw watermark text at the configured position."""
+        draw = ImageDraw.Draw(self.image)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        text = f"{DEFAULT_WATERMARK_TEXT} | {timestamp}"
+        font = ImageFont.load_default()
+        bbox = font.getbbox(text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+
+        if self.watermark_position == "bottom_left":
+            position = (10, self.image.height - text_height - 10)
+        elif self.watermark_position == "bottom_right":
+            position = (self.image.width - text_width - 10,
+                        self.image.height - text_height - 10)
+        elif self.watermark_position == "top_left":
+            position = (10, 10)
+        else:  # top_right
+            position = (self.image.width - text_width - 10, 10)
+
+        draw.text(position, text, fill=(255, 255, 255), font=font)
+
+    def _generate_filename(self):
+        """Return a consistent filename using current datetime."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"IMG_{timestamp}.jpg"
+
+    def _create_date_folder(self):
+        """Return path to today's subfolder, creating it as needed."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        folder_path = os.path.join(OUTPUT_BASE_DIR, today)
+        os.makedirs(folder_path, exist_ok=True)
+        return folder_path
+
+    def _save_with_metadata(self, path):
+        """Save self.image to `path` embedding simple metadata.
+
+        Chooses parameters based on file extension (JPEG/PNG).
+        """
+        metadata_text = f"Captured by {APP_NAME} on " \
+                        f"{datetime.now().isoformat()}"
+
+        if path.lower().endswith(".png"):
+            info_obj = PngImagePlugin.PngInfo()
+            info_obj.add_text("Description", metadata_text)
+            self.image.save(path, pnginfo=info_obj, optimize=True)
+        else:
+            # JPEG case: use comment field
+            info = self.image.info.copy()
+            info["comment"] = metadata_text.encode("utf-8")
+            self.image.save(path, quality=self.save_quality,
+                            optimize=True, **info)
+
+    def save_image(self):
+        """Prepare current image (border, watermark) and persist to disk."""
+        if self.image is None:
+            messagebox.showerror("Error", "Tidak ada gambar untuk disimpan.")
+            self._update_status("Error: No image available")
+            return
+
+        self._add_border()
+        self._add_watermark()
+
+        folder = self._create_date_folder()
+        filename = self._generate_filename()
+        full_path = os.path.join(folder, filename)
+
+        try:
+            self._save_with_metadata(full_path)
+        except (OSError, IOError) as exc:
+            messagebox.showerror("Error", f"Gagal menyimpan: {exc}")
+            self._update_status("Error: Save failed")
+            return
+
+        self._log_attendance(full_path)
+        self._update_status(f"✓ Saved: {filename}")
+        messagebox.showinfo("Sukses", f"Tersimpan ke:\n{full_path}")
+
+    def quick_capture_and_save(self):
+        """Quick capture from webcam and save directly without confirmation."""
+        if not self.is_camera_running:
+            messagebox.showerror("Error", "Mulai webcam terlebih dahulu!")
+            return
+
+        ret, frame = self.cap.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            self.image = Image.fromarray(frame)
+            self._auto_brightness()
+            self._add_border()
+            self._add_watermark()
+
+            folder = self._create_date_folder()
+            filename = self._generate_filename()
+            full_path = os.path.join(folder, filename)
+
+            try:
+                self._save_with_metadata(full_path)
+                self._log_attendance(full_path)
+                self._update_status(f"✓ Quick saved: {filename}")
+                messagebox.showinfo("Sukses", "Tersimpan ke output folder!")
+            except (OSError, IOError) as exc:
+                messagebox.showerror("Error", f"Gagal menyimpan: {exc}")
+                self._update_status("Error: Quick save failed")
+        else:
+            messagebox.showerror("Error", "Gagal mengambil frame dari webcam")
+
+    def _log_attendance(self, path):
+        """Append a record to the CSV log file."""
+        file_exists = os.path.isfile(CSV_LOG_PATH)
+        with open(CSV_LOG_PATH, mode="a", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            if not file_exists:
+                writer.writerow(["Timestamp", "File Path"])
+            writer.writerow([datetime.now().isoformat(), path])
+
+    def _update_status(self, message):
+        """Update the status bar message."""
+        collage_count = len(self.collage_images)
+        self.status_label.configure(text=f"{message} | Collage: {collage_count}/4")
+
+    # =========================
+    # COLLAGE MANAGEMENT
+    # =========================
+
+    def add_to_collage(self):
+        """Add current image to the internal collage buffer."""
+        if self.image is None:
+            messagebox.showerror("Error", "Tidak ada gambar untuk collage.")
+            return
+        self.collage_images.append(self.image.copy())
+        # keep only last 4 images
+        if len(self.collage_images) > 4:
+            self.collage_images.pop(0)
+        
+        count = len(self.collage_images)
+        self.collage_counter_label.configure(text=f"Images: {count}/4")
+        self._update_status("✓ Added to collage")
+        messagebox.showinfo("Collage", f"Gambar ditambahkan ({count}/4)")
+
+    def clear_collage(self):
+        """Reset the collage buffer."""
+        self.collage_images.clear()
+        self.collage_counter_label.configure(text="Images: 0/4")
+        self._update_status("✓ Collage cleared")
+        messagebox.showinfo("Collage", "Buffer collage dibersihkan.")
+
+    def create_and_save_collage(self):
+        """Build a 2x2 collage from buffered images and save it."""
+        if not self.collage_images:
+            messagebox.showerror("Error", "Tidak ada gambar untuk collage.")
+            return
+        
+        collage = self._build_collage(self.collage_images, title="Attendance Collage")
+        
+        # Save collage to output folder
+        folder = self._create_date_folder()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"COLLAGE_{timestamp}.jpg"
+        full_path = os.path.join(folder, filename)
+        
+        try:
+            collage.save(full_path, quality=self.save_quality, optimize=True)
+            self._log_attendance(full_path)
+            self._update_status("✓ Collage saved")
+            messagebox.showinfo("Sukses", f"Collage tersimpan:\n{full_path}")
+        except (OSError, IOError) as exc:
+            messagebox.showerror("Error", f"Gagal menyimpan collage: {exc}")
+            self._update_status("Error: Collage save failed")
+        
+        # Display collage
+        self.image = collage
+        self._display_image()
+
+    def _build_collage(self, images, title=None):
+        """Return a new PIL image containing a 2x2 collage.
+
+        Args:
+            images (list[PIL.Image]): up to four images.
+            title (str, optional): text to draw at top centre.
+        """
+        # normalize all images to same size
+        sizes = [img.size for img in images]
+        target_w = max(w for w, h in sizes)
+        target_h = max(h for w, h in sizes)
+        norm_images = [img.resize((target_w, target_h), resample=self._pil_interpolation())
+                       for img in images]
+
+        cols = 2
+        rows = 2
+        canvas_w = cols * target_w + (cols + 1) * COLLAGE_SPACING
+        title_height = 0
+        if title:
+            # measure using font directly; draw.textsize may not exist
+            font = COLLAGE_TITLE_FONT or ImageFont.load_default()
+            bbox = font.getbbox(title)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            title_height = text_h + COLLAGE_SPACING
+            canvas_h = rows * target_h + (rows + 1) * COLLAGE_SPACING + title_height
+        else:
+            canvas_h = rows * target_h + (rows + 1) * COLLAGE_SPACING
+
+        canvas = Image.new("RGB", (canvas_w, canvas_h), color=DEFAULT_BORDER_COLOR)
+        draw = ImageDraw.Draw(canvas)
+
+        if title:
+            # ensure we have a font object
+            font = COLLAGE_TITLE_FONT or ImageFont.load_default()
+            bbox = font.getbbox(title)
+            text_w = bbox[2] - bbox[0]
+            draw.text(((canvas_w - text_w) // 2, COLLAGE_SPACING),
+                      title, font=font,
+                      fill=COLLAGE_TITLE_COLOR)
+
+        idx = 0
+        for r in range(rows):
+            for c in range(cols):
+                if idx < len(norm_images):
+                    x = COLLAGE_SPACING + c * (target_w + COLLAGE_SPACING)
+                    y = COLLAGE_SPACING + title_height + r * (target_h + COLLAGE_SPACING)
+                    canvas.paste(norm_images[idx], (x, y))
+                idx += 1
+        return canvas
+
+
+# =========================
+# RUN APPLICATION
+# =========================
+
+if __name__ == "__main__":
+    app = DigitalAttendanceApp()
+    app.mainloop()
